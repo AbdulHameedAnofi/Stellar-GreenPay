@@ -2756,4 +2756,113 @@ mod tests {
 
         client.refund_donation(&not_admin, &pid, &donor, &(10 * STROOP), &token);
     }
+
+    // ─── Minimum donation enforcement (#1043) ─────────────────────────────────
+
+    /// Minimum used by the guard tests below: 10 XLM, expressed in stroops.
+    const TEST_MIN_DONATION: i128 = 10 * STROOP;
+
+    /// Fresh contract holding one project with a 10 XLM minimum donation, and a
+    /// donor funded with 100 XLM of the donation token.
+    fn setup_min_donation() -> (
+        Env,
+        GreenPayContractClient<'static>,
+        Address,
+        String,
+        Address,
+        Address,
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, GreenPayContract);
+        let client = GreenPayContractClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let pid = String::from_str(&env, "proj-min-donation");
+        let wallet = Address::generate(&env);
+        client.register_project(
+            &admin,
+            &pid,
+            &String::from_str(&env, "Minimum Guard Project"),
+            &wallet,
+            &100u32,
+            &TEST_MIN_DONATION,
+        );
+
+        let token_admin = Address::generate(&env);
+        let token = env.register_stellar_asset_contract_v2(token_admin).address();
+        let donor = Address::generate(&env);
+        StellarAssetClient::new(&env, &token).mint(&donor, &(100 * STROOP));
+
+        (env, client, token, pid, donor, wallet)
+    }
+
+    /// The exact scenario from #1043: a single stroop sent to a project that
+    /// configured a 10 XLM minimum must not be accepted.
+    #[test]
+    #[should_panic(expected = "Donation below minimum")]
+    fn test_donate_one_stroop_below_ten_xlm_minimum_is_rejected() {
+        let (_env, client, token, pid, donor, _wallet) = setup_min_donation();
+
+        client.donate(&token, &donor, &pid, &1i128, &0u32);
+    }
+
+    /// Boundary case: one stroop under the minimum is still under the minimum.
+    #[test]
+    #[should_panic(expected = "Donation below minimum")]
+    fn test_donate_just_below_minimum_is_rejected() {
+        let (_env, client, token, pid, donor, _wallet) = setup_min_donation();
+
+        client.donate(&token, &donor, &pid, &(TEST_MIN_DONATION - 1), &0u32);
+    }
+
+    /// A rejected donation must leave no trace: no funds moved, no accounting.
+    #[test]
+    fn test_donate_below_minimum_leaves_state_untouched() {
+        let (env, client, token, pid, donor, wallet) = setup_min_donation();
+
+        let attempted = client.try_donate(&token, &donor, &pid, &1i128, &0u32);
+        assert!(attempted.is_err());
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, 0);
+        assert_eq!(client.get_donation_count(), 0);
+        assert_eq!(client.get_global_total(), 0);
+
+        let token_client = token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&wallet), 0);
+        assert_eq!(token_client.balance(&donor), 100 * STROOP);
+    }
+
+    /// Donating exactly the minimum is allowed — the guard is `<`, not `<=`.
+    #[test]
+    fn test_donate_at_exact_minimum_succeeds() {
+        let (env, client, token, pid, donor, wallet) = setup_min_donation();
+
+        client.donate(&token, &donor, &pid, &TEST_MIN_DONATION, &0u32);
+
+        let project = client.get_project(&pid);
+        assert_eq!(project.total_raised, TEST_MIN_DONATION);
+        assert_eq!(client.get_donation_count(), 1);
+
+        let token_client = token::Client::new(&env, &token);
+        assert_eq!(token_client.balance(&wallet), TEST_MIN_DONATION);
+        assert_eq!(
+            token_client.balance(&donor),
+            100 * STROOP - TEST_MIN_DONATION,
+        );
+    }
+
+    /// Comfortably above the minimum still succeeds.
+    #[test]
+    fn test_donate_above_minimum_succeeds() {
+        let (_env, client, token, pid, donor, _wallet) = setup_min_donation();
+
+        let amount = TEST_MIN_DONATION * 2;
+        client.donate(&token, &donor, &pid, &amount, &0u32);
+
+        assert_eq!(client.get_project(&pid).total_raised, amount);
+        assert_eq!(client.get_donation_count(), 1);
+    }
 }
