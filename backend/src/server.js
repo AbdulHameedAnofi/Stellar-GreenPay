@@ -98,6 +98,10 @@ const io = new Server(server, {
   },
 });
 app.set("io", io);
+
+const { registerSocketHandlers } = require("./services/socketHandler");
+registerSocketHandlers(io);
+
 app.use(createRateLimiter(150, 15, "global"));
 
 // ── CSRF token endpoint ────────────────────────────────────────────
